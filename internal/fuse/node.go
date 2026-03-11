@@ -13,6 +13,8 @@ import (
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
 
+	"github.com/opcsg/opencsg-fuse-gitaly/internal/cache"
+	"github.com/opcsg/opencsg-fuse-gitaly/internal/config"
 	"github.com/opcsg/opencsg-fuse-gitaly/internal/gitalyclient"
 	"gitlab.com/gitlab-org/gitaly/v16/proto/go/gitalypb"
 )
@@ -49,11 +51,33 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 	return nil
 }
 
+func (d *Dir) getTreeEntries(ctx context.Context) ([]*gitalypb.TreeEntry, error) {
+	ctx, cancel := config.WithTimeout(ctx, d.fs.Config.GRPCTimeout)
+	defer cancel()
+	pathKey := d.path
+	if pathKey == "" {
+		pathKey = "."
+	}
+	if d.fs.Cache != nil {
+		if v, ok := d.fs.Cache.Get(cache.KeyTree(d.fs.Branch, pathKey)); ok {
+			return v.([]*gitalypb.TreeEntry), nil
+		}
+	}
+	entries, err := d.fs.Client.GetTreeEntries(ctx, d.fs.Repo, d.fs.Branch, d.path, false)
+	if err != nil {
+		return nil, err
+	}
+	if d.fs.Cache != nil {
+		d.fs.Cache.Set(cache.KeyTree(d.fs.Branch, pathKey), entries)
+	}
+	return entries, nil
+}
+
 func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	if name == "." || name == ".." {
 		return nil, syscall.ENOENT
 	}
-	entries, err := d.fs.Client.GetTreeEntries(ctx, d.fs.Repo, d.fs.Branch, d.path, false)
+	entries, err := d.getTreeEntries(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +108,7 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 }
 
 func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
-	entries, err := d.fs.Client.GetTreeEntries(ctx, d.fs.Repo, d.fs.Branch, d.path, false)
+	entries, err := d.getTreeEntries(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -119,6 +143,8 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
 	newPath := gitalyclient.JoinPath(d.path, req.Name)
+	ctx, cancel := config.WithTimeout(ctx, d.fs.Config.GRPCTimeout)
+	defer cancel()
 	_, err := d.fs.Client.UserCommitFiles(ctx, d.fs.Repo, d.fs.Branch, "FUSE mkdir: "+newPath, d.fs.User,
 		gitalyclient.Action{
 			Type:     gitalypb.UserCommitFilesActionHeader_CREATE_DIR,
@@ -128,6 +154,7 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 	if err != nil {
 		return nil, err
 	}
+	d.fs.InvalidatePaths(newPath, d.path)
 	return &Dir{
 		fs:    d.fs,
 		path:  newPath,
@@ -138,6 +165,8 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
 	newPath := gitalyclient.JoinPath(d.path, req.Name)
 	content := []byte{}
+	ctx, cancel := config.WithTimeout(ctx, d.fs.Config.GRPCTimeout)
+	defer cancel()
 	if req.Mode&os.ModeDir != 0 {
 		_, err := d.fs.Client.UserCommitFiles(ctx, d.fs.Repo, d.fs.Branch, "FUSE mkdir: "+newPath, d.fs.User,
 			gitalyclient.Action{
@@ -148,6 +177,7 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 		if err != nil {
 			return nil, nil, err
 		}
+		d.fs.InvalidatePaths(newPath, d.path)
 		dir := &Dir{
 			fs:    d.fs,
 			path:  newPath,
@@ -165,6 +195,7 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 	if err != nil {
 		return nil, nil, err
 	}
+	d.fs.InvalidatePaths(newPath, d.path)
 	f := &File{
 		fs:    d.fs,
 		path:  newPath,
@@ -183,6 +214,8 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 	} else {
 		return syscall.EIO
 	}
+	ctx, cancel := config.WithTimeout(ctx, d.fs.Config.GRPCTimeout)
+	defer cancel()
 	_, err := d.fs.Client.UserCommitFiles(ctx, d.fs.Repo, d.fs.Branch, "FUSE mv: "+prevPath+" -> "+targetPath, d.fs.User,
 		gitalyclient.Action{
 			Type:         gitalypb.UserCommitFilesActionHeader_MOVE,
@@ -190,7 +223,11 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 			PreviousPath: prevPath,
 		},
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	d.fs.InvalidatePaths(prevPath, targetPath)
+	return nil
 }
 
 // File implements a file node backed by Gitaly blob.
@@ -211,26 +248,67 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 	}
 	a.Mode = 0o444
 	if f.oid != "" {
+		pathKey := f.path
+		if pathKey == "" {
+			pathKey = "."
+		}
+		if f.fs.Cache != nil {
+			if v, ok := f.fs.Cache.Get(cache.KeyMeta(f.fs.Branch, pathKey)); ok {
+				a.Size = uint64(v.(int64))
+				return nil
+			}
+		}
+		ctx, cancel := config.WithTimeout(ctx, f.fs.Config.GRPCTimeout)
+		defer cancel()
 		_, _, size, _, _, err := f.fs.Client.GetTreeEntry(ctx, f.fs.Repo, f.fs.Branch, f.path, 1)
 		if err == nil {
 			a.Size = uint64(size)
+			if f.fs.Cache != nil {
+				f.fs.Cache.Set(cache.KeyMeta(f.fs.Branch, pathKey), size)
+			}
 		}
 	}
 	return nil
 }
 
 func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
+	ctx, cancel := config.WithTimeout(ctx, f.fs.Config.GRPCTimeout)
+	defer cancel()
+	pathKey := f.path
+	if pathKey == "" {
+		pathKey = "."
+	}
 	var data []byte
 	var err error
 	if f.oid != "" {
-		data, err = f.fs.Client.GetBlob(ctx, f.fs.Repo, f.oid, -1)
-		if err != nil {
-			return nil, err
+		if f.fs.Cache != nil {
+			if v, ok := f.fs.Cache.Get(cache.KeyBlob(f.oid)); ok {
+				data = v.([]byte)
+			}
+		}
+		if data == nil {
+			data, err = f.fs.Client.GetBlob(ctx, f.fs.Repo, f.oid, -1)
+			if err != nil {
+				return nil, err
+			}
+			if f.fs.Cache != nil && (f.fs.Config.Cache.MaxBlobSize <= 0 || int64(len(data)) <= f.fs.Config.Cache.MaxBlobSize) {
+				f.fs.Cache.Set(cache.KeyBlob(f.oid), data)
+			}
 		}
 	} else {
-		_, _, _, _, blobData, err := f.fs.Client.GetTreeEntry(ctx, f.fs.Repo, f.fs.Branch, f.path, -1)
-		if err == nil {
-			data = blobData
+		if f.fs.Cache != nil {
+			if v, ok := f.fs.Cache.Get(cache.KeyBlobPath(f.fs.Branch, pathKey)); ok {
+				data = v.([]byte)
+			}
+		}
+		if data == nil {
+			_, _, _, _, blobData, err := f.fs.Client.GetTreeEntry(ctx, f.fs.Repo, f.fs.Branch, f.path, -1)
+			if err == nil {
+				data = blobData
+				if f.fs.Cache != nil && (f.fs.Config.Cache.MaxBlobSize <= 0 || int64(len(data)) <= f.fs.Config.Cache.MaxBlobSize) {
+					f.fs.Cache.Set(cache.KeyBlobPath(f.fs.Branch, pathKey), data)
+				}
+			}
 		}
 	}
 	resp.Flags |= fuse.OpenKeepCache

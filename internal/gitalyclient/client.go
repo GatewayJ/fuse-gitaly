@@ -5,6 +5,7 @@
 package gitalyclient
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -145,6 +146,7 @@ func (c *Client) GetTreeEntry(ctx context.Context, repo *gitalypb.Repository, re
 		return 0, "", 0, 0, nil, fmt.Errorf("tree entry: %w", err)
 	}
 
+	var buf bytes.Buffer
 	for {
 		resp, err := stream.Recv()
 		if err == io.EOF {
@@ -158,10 +160,13 @@ func (c *Client) GetTreeEntry(ctx context.Context, repo *gitalypb.Repository, re
 			size = resp.GetSize()
 			mode = resp.GetMode()
 			typ = resp.GetType()
+			if size > 0 && limit < 0 {
+				buf.Grow(int(size))
+			}
 		}
-		data = append(data, resp.GetData()...)
+		buf.Write(resp.GetData())
 	}
-	return typ, oid, size, mode, data, nil
+	return typ, oid, size, mode, buf.Bytes(), nil
 }
 
 // GetBlob reads blob content by OID.
@@ -178,7 +183,7 @@ func (c *Client) GetBlob(ctx context.Context, repo *gitalypb.Repository, oid str
 		return nil, fmt.Errorf("get blob: %w", err)
 	}
 
-	var data []byte
+	var buf bytes.Buffer
 	for {
 		resp, err := stream.Recv()
 		if err == io.EOF {
@@ -187,9 +192,9 @@ func (c *Client) GetBlob(ctx context.Context, repo *gitalypb.Repository, oid str
 		if err != nil {
 			return nil, fmt.Errorf("recv blob: %w", err)
 		}
-		data = append(data, resp.GetData()...)
+		buf.Write(resp.GetData())
 	}
-	return data, nil
+	return buf.Bytes(), nil
 }
 
 // Action represents a UserCommitFiles action.

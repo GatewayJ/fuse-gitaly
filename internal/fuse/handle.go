@@ -10,6 +10,7 @@ import (
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
 
+	"github.com/opcsg/opencsg-fuse-gitaly/internal/config"
 	"github.com/opcsg/opencsg-fuse-gitaly/internal/gitalyclient"
 	"gitlab.com/gitlab-org/gitaly/v16/proto/go/gitalypb"
 )
@@ -70,11 +71,14 @@ func (h *FileHandle) commitIfDirty(ctx context.Context) error {
 	h.mu.Lock()
 	dirty := h.dirty
 	data := append([]byte(nil), h.data...)
+	oldOid := h.file.oid
 	h.dirty = false
 	h.mu.Unlock()
 	if !dirty {
 		return nil
 	}
+	ctx, cancel := config.WithTimeout(ctx, h.file.fs.Config.GRPCTimeout)
+	defer cancel()
 	_, err := h.file.fs.Client.UserCommitFiles(ctx, h.file.fs.Repo, h.file.fs.Branch, "FUSE edit: "+h.file.path, h.file.fs.User,
 		gitalyclient.Action{
 			Type:     gitalypb.UserCommitFilesActionHeader_UPDATE,
@@ -82,5 +86,10 @@ func (h *FileHandle) commitIfDirty(ctx context.Context) error {
 			Content:  data,
 		},
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	h.file.fs.InvalidatePaths(h.file.path)
+	h.file.fs.InvalidateBlob(oldOid)
+	return nil
 }
