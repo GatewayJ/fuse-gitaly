@@ -1,0 +1,14 @@
+# Copyright (c) 2025 OpenCSG
+# SPDX-License-Identifier: MIT
+
+services:
+  gitaly:
+    # Alpine 镜像可直接使用 config.toml，无需模板
+    image: alpinelinux/gitaly:18.7.5
+    container_name: gitaly-local
+    ports:
+      - "${GITALY_PORT:-8075}:8075"
+    volumes:
+      - ./.gitaly-data/repositories:/home/git/repositories:rw
+      - ./config/gitaly.toml:/etc/gitaly/config.toml:ro
+    command: ["gitaly", "/etc/gitaly/config.toml"]

@@ -1,0 +1,24 @@
+# Copyright (c) 2025 OpenCSG
+# SPDX-License-Identifier: MIT
+#
+# Gitaly 本地开发配置
+
+bin_dir = "/usr/local/bin"
+listen_addr = "0.0.0.0:8075"
+
+[git]
+use_bundled_binaries = true
+
+[[storage]]
+name = "default"
+path = "/home/git/repositories"
+
+[logging]
+format = "json"
+level = "info"
+dir = "/var/log/gitaly"
+
+# GitLab API 客户端 (必需，本地开发用占位 URL)
+[gitlab]
+url = "http://localhost:8080"
+secret = "development-secret"

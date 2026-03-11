@@ -1,0 +1,12 @@
+# 构建产物
+gitaly-fuse
+*.exe
+
+# Gitaly 本地数据
+.gitaly-data/
+
+# IDE / 系统
+.idea/
+.vscode/
+*.swp
+.DS_Store
