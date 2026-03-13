@@ -29,3 +29,11 @@ func KeyBlob(oid string) string {
 func KeyBlobPath(branch, path string) string {
 	return PrefixBlob + "path:" + branch + ":" + path
 }
+
+// PrefixSkills 技能列表缓存前缀。
+const PrefixSkills = "skills:"
+
+// KeySkillsList 技能 API 列表缓存 key，category 为 "official" 或 "user"。
+func KeySkillsList(category string) string {
+	return PrefixSkills + "list:" + category
+}

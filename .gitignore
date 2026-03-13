@@ -1,5 +1,7 @@
-# 构建产物
-gitaly-fuse
+# 构建产物（仅忽略仓库根目录下的可执行文件）
+/gitaly-fuse
+/gitaly-fuse-static
+/skills-sync
 *.exe
 
 # Gitaly 本地数据

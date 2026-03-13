@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"path"
 	"strings"
 
@@ -91,13 +92,17 @@ func Repo(storageName, relativePath string) *gitalypb.Repository {
 
 // DefaultBranch returns the default branch name for the repository.
 func (c *Client) DefaultBranch(ctx context.Context, repo *gitalypb.Repository) (string, error) {
+	log.Printf("[gitaly] DefaultBranch repo=%s", repo.GetRelativePath())
 	resp, err := c.refClient.FindDefaultBranchName(ctx, &gitalypb.FindDefaultBranchNameRequest{
 		Repository: repo,
 	})
 	if err != nil {
+		log.Printf("[gitaly] DefaultBranch error: %v", err)
 		return "", fmt.Errorf("find default branch: %w", err)
 	}
-	return string(resp.GetName()), nil
+	name := string(resp.GetName())
+	log.Printf("[gitaly] DefaultBranch ok => %s", name)
+	return name, nil
 }
 
 // GetTreeEntries returns tree entries for the given path at revision.
@@ -106,6 +111,7 @@ func (c *Client) GetTreeEntries(ctx context.Context, repo *gitalypb.Repository, 
 	if repoPath == "" {
 		repoPath = "."
 	}
+	log.Printf("[gitaly] GetTreeEntries repo=%s revision=%s path=%s recursive=%v", repo.GetRelativePath(), revision, repoPath, recursive)
 	stream, err := c.commitClient.GetTreeEntries(ctx, &gitalypb.GetTreeEntriesRequest{
 		Repository: repo,
 		Revision:   []byte(revision),
@@ -114,6 +120,7 @@ func (c *Client) GetTreeEntries(ctx context.Context, repo *gitalypb.Repository, 
 		Sort:       gitalypb.GetTreeEntriesRequest_TREES_FIRST,
 	})
 	if err != nil {
+		log.Printf("[gitaly] GetTreeEntries error: %v", err)
 		return nil, fmt.Errorf("get tree entries: %w", err)
 	}
 
@@ -124,10 +131,12 @@ func (c *Client) GetTreeEntries(ctx context.Context, repo *gitalypb.Repository, 
 			break
 		}
 		if err != nil {
+			log.Printf("[gitaly] GetTreeEntries recv error: %v", err)
 			return nil, fmt.Errorf("recv tree entries: %w", err)
 		}
 		entries = append(entries, resp.GetEntries()...)
 	}
+	log.Printf("[gitaly] GetTreeEntries ok entries=%d", len(entries))
 	return entries, nil
 }
 
@@ -136,6 +145,7 @@ func (c *Client) GetTreeEntry(ctx context.Context, repo *gitalypb.Repository, re
 	if repoPath == "" {
 		repoPath = "."
 	}
+	log.Printf("[gitaly] GetTreeEntry repo=%s revision=%s path=%s limit=%d", repo.GetRelativePath(), revision, repoPath, limit)
 	stream, err := c.commitClient.TreeEntry(ctx, &gitalypb.TreeEntryRequest{
 		Repository: repo,
 		Revision:   []byte(revision),
@@ -143,6 +153,7 @@ func (c *Client) GetTreeEntry(ctx context.Context, repo *gitalypb.Repository, re
 		Limit:      limit,
 	})
 	if err != nil {
+		log.Printf("[gitaly] GetTreeEntry error: %v", err)
 		return 0, "", 0, 0, nil, fmt.Errorf("tree entry: %w", err)
 	}
 
@@ -153,6 +164,7 @@ func (c *Client) GetTreeEntry(ctx context.Context, repo *gitalypb.Repository, re
 			break
 		}
 		if err != nil {
+			log.Printf("[gitaly] GetTreeEntry recv error: %v", err)
 			return 0, "", 0, 0, nil, fmt.Errorf("recv tree entry: %w", err)
 		}
 		if oid == "" {
@@ -166,6 +178,7 @@ func (c *Client) GetTreeEntry(ctx context.Context, repo *gitalypb.Repository, re
 		}
 		buf.Write(resp.GetData())
 	}
+	log.Printf("[gitaly] GetTreeEntry ok path=%s oid=%s size=%d", repoPath, oid, len(buf.Bytes()))
 	return typ, oid, size, mode, buf.Bytes(), nil
 }
 
@@ -174,12 +187,14 @@ func (c *Client) GetBlob(ctx context.Context, repo *gitalypb.Repository, oid str
 	if limit <= 0 {
 		limit = -1
 	}
+	log.Printf("[gitaly] GetBlob repo=%s oid=%s limit=%d", repo.GetRelativePath(), oid, limit)
 	stream, err := c.blobClient.GetBlob(ctx, &gitalypb.GetBlobRequest{
 		Repository: repo,
 		Oid:        oid,
 		Limit:      limit,
 	})
 	if err != nil {
+		log.Printf("[gitaly] GetBlob error: %v", err)
 		return nil, fmt.Errorf("get blob: %w", err)
 	}
 
@@ -190,10 +205,12 @@ func (c *Client) GetBlob(ctx context.Context, repo *gitalypb.Repository, oid str
 			break
 		}
 		if err != nil {
+			log.Printf("[gitaly] GetBlob recv error: %v", err)
 			return nil, fmt.Errorf("recv blob: %w", err)
 		}
 		buf.Write(resp.GetData())
 	}
+	log.Printf("[gitaly] GetBlob ok oid=%s size=%d", oid, buf.Len())
 	return buf.Bytes(), nil
 }
 
@@ -210,8 +227,10 @@ func (c *Client) UserCommitFiles(ctx context.Context, repo *gitalypb.Repository,
 	if user == nil {
 		user = &gitalypb.User{Name: []byte("fuse"), Email: []byte("fuse@local")}
 	}
+	log.Printf("[gitaly] UserCommitFiles repo=%s branch=%s message=%q actions=%d", repo.GetRelativePath(), branch, message, len(actions))
 	stream, err := c.operationClient.UserCommitFiles(ctx)
 	if err != nil {
+		log.Printf("[gitaly] UserCommitFiles stream error: %v", err)
 		return nil, fmt.Errorf("user commit files stream: %w", err)
 	}
 
@@ -267,14 +286,18 @@ func (c *Client) UserCommitFiles(ctx context.Context, repo *gitalypb.Repository,
 
 	resp, err := stream.CloseAndRecv()
 	if err != nil {
+		log.Printf("[gitaly] UserCommitFiles close/recv error: %v", err)
 		return nil, fmt.Errorf("close and recv: %w", err)
 	}
 	if resp.GetIndexError() != "" {
+		log.Printf("[gitaly] UserCommitFiles index_error: %s", resp.GetIndexError())
 		return nil, fmt.Errorf("index error: %s", resp.GetIndexError())
 	}
 	if resp.GetPreReceiveError() != "" {
+		log.Printf("[gitaly] UserCommitFiles pre_receive_error: %s", resp.GetPreReceiveError())
 		return nil, fmt.Errorf("pre-receive error: %s", resp.GetPreReceiveError())
 	}
+	log.Printf("[gitaly] UserCommitFiles ok")
 	return resp.GetBranchUpdate(), nil
 }
 

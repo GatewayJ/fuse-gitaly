@@ -2,7 +2,10 @@
 
 > Copyright (c) 2025 OpenCSG. SPDX-License-Identifier: MIT
 
-将 Gitaly 仓库挂载为本地 FUSE 文件系统，支持 ls、cd、tree、mkdir、cat、vim、mv 等常用命令。
+支持两种 FUSE 挂载模式，均支持 **ls、cd、tree、cat、vim** 及缓存：
+
+- **gitaly**：将 Gitaly 仓库挂载为目录（支持 mkdir/mv 等写操作回写 Gitaly）
+- **skills**：将技能 API 列表 + 本地 clone 目录挂载为目录（official/、user/ 下为各技能，读写落盘）
 
 ## 技术栈
 
@@ -32,52 +35,112 @@ go build -o gitaly-fuse ./cmd/gitaly-fuse
 
 ## 运行
 
-```bash
-./gitaly-fuse -gitaly localhost:8075 -storage default -repo @hashed/ab/cd/abcd1234... /mnt/git
-```
+通过 **-mode** 区分挂载类型：`gitaly`（默认）或 `skills`。
 
-### 参数
+### 模式一：Gitaly（-mode=gitaly）
+
+```bash
+./gitaly-fuse -mode=gitaly -gitaly localhost:8075 -storage default -repo test-repo.git /mnt/git
+```
 
 | 参数 | 环境变量 | 说明 |
 |------|----------|------|
-| -gitaly | GITALY_ADDRESS | Gitaly 地址 (如 localhost:8075 或 unix:///path/to/socket) |
+| -mode | FUSE_MODE | 挂载模式，默认 gitaly |
+| -gitaly | GITALY_ADDRESS | Gitaly 地址 |
 | -storage | GITALY_STORAGE | 存储名称，默认 default |
-| -repo | GITALY_REPO | 仓库相对路径 (如 @hashed/ab/cd/abcd...) |
-| -branch | GITALY_BRANCH | 挂载分支，空则使用默认分支 |
-| -user | GITALY_USER | 提交作者名 |
-| -email | GITALY_EMAIL | 提交作者邮箱 |
-| -token | GITALY_TOKEN | Bearer token 用于 gRPC 认证 |
+| -repo | GITALY_REPO | 仓库相对路径 |
+| -branch | GITALY_BRANCH | 分支，空则默认分支 |
+| -user, -email | GITALY_USER, GITALY_EMAIL | 提交作者 |
+| -token | GITALY_TOKEN | gRPC Bearer token |
+| -cache | GITALY_CACHE | 是否启用缓存（tree/blob），默认 true |
+| -cache-max-entries | GITALY_CACHE_MAX_ENTRIES | 缓存条目数，默认 1000 |
+| -cache-ttl | GITALY_CACHE_TTL | 缓存 TTL，默认 5m |
+| -cache-max-blob-size | GITALY_CACHE_MAX_BLOB_SIZE | 大于此大小的 blob 不缓存，0=全缓存 |
+| -grpc-timeout | GITALY_GRPC_TIMEOUT | gRPC 超时，默认 30s |
 
-### 性能配置
+### 模式二：Skills（-mode=skills）
+
+挂载技能 API 列表 + 本地 clone 目录，根目录为 `official/` 与 `user/`，其下为技能名（首次访问时自动 clone），支持 **ls、cat、vim** 及技能列表缓存。
+
+```bash
+./gitaly-fuse -mode=skills -base-url https://api.example.com -skills-token YOUR_TOKEN /mnt/skills
+```
 
 | 参数 | 环境变量 | 说明 |
 |------|----------|------|
-| -cache | GITALY_CACHE | 是否启用缓存，默认 true |
-| -cache-max-entries | GITALY_CACHE_MAX_ENTRIES | 缓存最大条目数，默认 1000 |
-| -cache-ttl | GITALY_CACHE_TTL | 缓存过期时间，默认 5m |
-| -cache-max-blob-size | GITALY_CACHE_MAX_BLOB_SIZE | 超过此大小的 blob 不缓存（字节），0=全部缓存，默认 1MB |
-| -grpc-timeout | GITALY_GRPC_TIMEOUT | gRPC 调用超时，默认 30s |
+| -base-url | CSGHUB_API_BASE_URL | 技能 API 根地址 |
+| -skills-token | CSGHUB_USER_TOKEN | Bearer token |
+| -skills-user | CSGHUB_USER_NAME | 用户名（clone URL 认证） |
+| -workspace | AGENTICHUB_WORKSPACE | 工作目录，默认 /root/.agentichub |
+| -cache | GITALY_CACHE | 是否缓存技能列表，默认 true |
+| -cache-max-entries | GITALY_CACHE_MAX_ENTRIES | 缓存条目数 |
+| -cache-ttl | GITALY_CACHE_TTL | 技能列表缓存 TTL |
 
-### 示例
+挂载后目录结构示例：
+
+```
+/mnt/skills/
+├── official/
+│   ├── skill-a/    # 对应 clone 到 workspace/skills/official/skill-a
+│   └── skill-b/
+└── user/
+    └── my-skill/
+```
+
+### 通用示例
 
 ```bash
-# 使用环境变量
+# Gitaly：环境变量
 export GITALY_ADDRESS=localhost:8075
-export GITALY_REPO=@hashed/ab/cd/abcd1234...
-./gitaly-fuse /mnt/git
+export GITALY_REPO=test-repo.git
+./gitaly-fuse -mode=gitaly /mnt/git
 
-# 指定分支
-./gitaly-fuse -gitaly localhost:8075 -repo my-project -branch main /mnt/git
+# Skills：环境变量
+export CSGHUB_API_BASE_URL=https://api.example.com
+export CSGHUB_USER_TOKEN=xxx
+./gitaly-fuse -mode=skills /mnt/skills
 
-# 使用 token 认证
-./gitaly-fuse -gitaly localhost:8075 -repo my-project -token "your-token" /mnt/git
-
-# 禁用缓存（调试用）
-./gitaly-fuse -cache=false -gitaly localhost:8075 -repo my-project /mnt/git
-
-# 调整缓存与超时
-./gitaly-fuse -cache-max-entries 2000 -cache-ttl 10m -grpc-timeout 60s -gitaly localhost:8075 -repo my-project /mnt/git
+# 禁用缓存（调试）
+./gitaly-fuse -cache=false -mode=gitaly -gitaly localhost:8075 -repo test-repo.git /mnt/git
 ```
+
+## 技能同步（Skills Sync）— 对接 AgentHub/CSGHub API
+
+若需对接 **技能列表 API** 并按脚本方式下载技能仓库（与 Python 脚本行为一致），可使用 `skills-sync`：
+
+1. **GET** `{base_url}/api/v1/agent/skills` 拉取技能列表  
+2. 将每个技能 **git clone** 到本地：`https://{user}:{token}@{base}/skills/{skill.path}.git`  
+3. 落盘目录：`{workspace}/skills/official/` 与 `{workspace}/skills/user/`
+
+### 编译 skills-sync
+
+```bash
+go build -o skills-sync ./cmd/skills-sync
+```
+
+### 环境变量
+
+| 变量 | 说明 |
+|------|------|
+| `CSGHUB_API_BASE_URL` | API 根地址（如 `https://api.example.com`） |
+| `CSGHUB_USER_TOKEN` | Bearer 认证 Token |
+| `CSGHUB_USER_NAME` | 用户名，用于 clone URL 认证 |
+| `AGENTICHUB_WORKSPACE` | 工作目录，默认 `/root/.agentichub` |
+
+### 运行
+
+```bash
+export CSGHUB_API_BASE_URL=https://your-api.example.com
+export CSGHUB_USER_TOKEN=your-token
+export CSGHUB_USER_NAME=your-username
+./skills-sync
+```
+
+- 若已存在成功标记文件（`.skills_initialized`），会直接跳过。  
+- 同步完成后，技能在 `{workspace}/skills/official/<name>` 与 `{workspace}/skills/user/<name>` 下，可直接访问文件。  
+- 实现位于 `internal/skillsclient`，可在其他 Go 代码中复用 `FetchSkills`、`CloneOrPull`、`SyncAll`。
+
+---
 
 ## 支持的操作
 
